@@ -346,7 +346,17 @@ def api_login(email, password):
             data={'locale': 'zh-CN', 'identifier': email, 'password': password, 'strategy': 'password'},
             timeout=20, proxies=REQUESTS_PROXIES)
         if r.status_code != 200:
-            log(f"❌ 登录失败: HTTP {r.status_code} {r.text[:120]}")
+            # Clerk 已登录态会回 400 session_exists，但包里常带可用 session，直接捡回来
+            try:
+                err_data = r.json()
+            except Exception:
+                err_data = {}
+            for s in ((err_data.get('client') or {}).get('sessions') or []):
+                jwt = (s.get('last_active_token') or {}).get('jwt')
+                if jwt:
+                    log("✅ 复用已存在会话")
+                    return jwt
+            log(f"❌ 登录失败: HTTP {r.status_code} {r.text[:200]}")
             return None
         data = r.json()
         sessions = (data.get('client') or {}).get('sessions') or []
