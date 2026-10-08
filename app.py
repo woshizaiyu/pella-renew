@@ -361,6 +361,7 @@ def api_login(email, password):
         data = r.json()
         sessions = (data.get('client') or {}).get('sessions') or []
         if sessions and sessions[0].get('last_active_token', {}).get('jwt'):
+            log("✅ 账号密码登录成功")
             return sessions[0]['last_active_token']['jwt']
         sid = (data.get('response') or {}).get('created_session_id')
         if not sid and sessions:
@@ -379,6 +380,7 @@ def api_login(email, password):
             tok = (d2.get('sessions') or [{}])[0].get('last_active_token', {}).get('jwt') \
                 or (d2.get('last_active_token') or {}).get('jwt')
             if tok:
+                log("✅ 账号密码登录成功")
                 return tok
         log("❌ 登录成功但无法获取 token")
         return None
@@ -591,16 +593,43 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
         return False
     log(f"🖱️ [{tag}] 已点 I am not a robot，进倒计时")
 
-    # 第3页："Please wait while your link is being prepared" 倒计时 → /go/ 跳转链接（截图3）
-    # 中途可能进 Shrinkearn 中转页（失败截图1），顺手过掉；deadline 轮询
+    # 第3页：等倒计时走完（截图：0 Seconds + Go → 按钮），点 Go（submit 表单提交，非 a 链接）
+    time.sleep(10)
+    # 第4步：点 Go → 跟跳（本页或新标签）→ 落 pella /renew/；中途 Shrinkearn 中转顺手过掉
     dest = ''
+    go_page = page
     deadline = time.time() + 180
     while time.time() < deadline:
+        # A. 终点已出现（本页或新标签）？
+        for pg in ctx.pages:
+            try:
+                u = pg.url or ''
+            except Exception:
+                continue
+            if 'pella.app/renew' in u:
+                dest, go_page = u, pg
+                break
+        if dest:
+            break
+        # B. 点 Go 按钮（#submit-button.vhit，文字 Go →）
+        for sel in ['button:has-text("Go"):visible', '#submit-button:visible']:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() == 0:
+                    continue
+                loc.scroll_into_view_if_needed(timeout=5000)
+                loc.click(timeout=5000)
+                log(f"🖱️ [{tag}] 已点 Go ({sel})")
+                break
+            except Exception:
+                continue
+        # C. 兜底：直接露出 /go/ 直链
         try:
             loc = page.locator('a[href*="/go/"]:visible').first
             if loc.count() > 0:
-                dest = loc.get_attribute('href') or ''
-                if dest:
+                href = loc.get_attribute('href') or ''
+                if href:
+                    dest = href if href.startswith('http') else page.url.rsplit('/', 1)[0] + href
                     break
         except Exception:
             pass
@@ -608,10 +637,32 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
         time.sleep(3)
     if not dest:
         page.screenshot(path=f"ad_no_go_{tag}.png")
-        log(f"❌ [{tag}] 倒计时后未出现 /go/ 跳转链接")
+        log(f"❌ [{tag}] 倒计时后未到终点（无 Go 跳转）")
         return False
-    if dest.startswith('/'):
-        dest = page.url.rsplit('/', 1)[0] + dest
+    if '/go/' in dest and 'pella.app' not in dest:
+        # /go/ 本身是中转，手动跟过去再等落点
+        try:
+            go_page.goto(dest, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            log(f"⚠️ [{tag}] 跟 /go/ 异常: {str(e)[:100]}")
+        end = time.time() + 60
+        while time.time() < end:
+            for pg in ctx.pages:
+                try:
+                    u = pg.url or ''
+                except Exception:
+                    continue
+                if 'pella.app/renew' in u:
+                    dest, go_page = u, pg
+                    break
+            if 'pella.app/renew' in dest:
+                break
+            time.sleep(2)
+    if 'pella.app/renew' not in dest:
+        page.screenshot(path=f"ad_no_go_{tag}.png")
+        log(f"❌ [{tag}] 未落到 pella 领奖页: {dest[:100]}")
+        return False
+    page = go_page
     log(f"🔗 [{tag}] 终点: {dest}")
 
     # 临用前换新鲜 JWT（60s 有效），再进领奖页（前端 /renew/:id 落页 2s 自动 claim）
@@ -632,14 +683,16 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     except Exception:
         pass
 
+    jwt2 = jwt
     for i in range(4):
         time.sleep(5)
-        jwt2 = api_auth(session, email, password, cookie) or jwt
         info = api_get_info(session, jwt2, server_id)
-        for l in info.get('renew_links') or []:
-            if l.get('id') == lid and l.get('claimed'):
-                log(f"✅ [{tag}] 已领取")
-                return True
+        links_now = info.get('renew_links') or []
+        if any(l.get('id') == lid and l.get('claimed') for l in links_now):
+            log(f"✅ [{tag}] 已领取")
+            return True
+        if i < 3 and not links_now:
+            jwt2 = api_auth(session, email, password, cookie) or jwt2
     page.screenshot(path=f"claim_fail_{tag}.png")
     log(f"❌ [{tag}] 领奖未确认（claimed 仍 false）")
     return False
@@ -701,6 +754,7 @@ def process_account(browser, email, password, cookie, current_ip):
     jwt = api_auth(session, email, password, cookie)
     if not jwt:
         return False, "❌ 错误: 登录失败"
+    jwt_ts = time.time()  # JWT 60s 有效，50s 内不重复登录去噪
     servers = api_get_servers(session, jwt)
     if not servers:
         return True, "⏳ 无需续期\n暂无服务器"
@@ -710,7 +764,9 @@ def process_account(browser, email, password, cookie, current_ip):
             sid = srv.get('id')
             name = srv.get('name') or sid[:8]
             ip = srv.get('ip') or 'N/A'
-            jwt = api_auth(session, email, password, cookie) or jwt  # JWT 60s 有效，每台刷新
+            if time.time() - jwt_ts > 50:
+                jwt = api_auth(session, email, password, cookie) or jwt
+                jwt_ts = time.time()
             api_refresh_links(session, jwt, sid)
             time.sleep(1)
             info = api_get_info(session, jwt, sid)
