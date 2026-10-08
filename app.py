@@ -334,8 +334,10 @@ def new_account_page(browser):
 
 # ==================== Pella API（Worker 登录逻辑移植） ====================
 
-def api_login(session, email, password):
-    """Clerk 账密登录，返回 JWT（即 __session cookie 值，60s 有效，用完即换）。"""
+def api_login(email, password):
+    """Clerk 账密登录，返回 JWT（即 __session cookie 值，60s 有效，用完即换）。
+    每次用全新 Session：复用旧 Session 会因残留 __client 被 Clerk 判 session_exists (400)。"""
+    session = requests.Session()
     try:
         r = session.post(
             f"https://clerk.pella.app/v1/client/sign_ins?__clerk_api_version={CLERK_API_VERSION}&_clerk_js_version={CLERK_JS_VERSION}",
@@ -477,29 +479,35 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     handle_cloudflare(page, timeout=120)
     time.sleep(2)
 
-    used = click_first_visible(page, ['#submit-button', 'button:has-text("Continue"):visible',
-                                      'button:has-text("I am not a robot"):visible'])
-    if not used:
-        page.screenshot(path=f"ad_no_button_{tag}.png")
-        log(f"❌ [{tag}] 找不到 Continue 按钮")
+    # 第1页："Please click the button below to continue." → 点 Continue（截图1）
+    if not click_first_visible(page, ['button:has-text("Continue"):visible', '#submit-button']):
+        page.screenshot(path=f"ad_no_continue_{tag}.png")
+        log(f"❌ [{tag}] 第1页找不到 Continue 按钮")
         return False
-    log(f"🖱️ [{tag}] 已点 Continue ({used})")
+    log(f"🖱️ [{tag}] 已点 Continue，进验证页")
 
+    # 第2页：CF 盾自动过 + "verify that you are not a robot" → 点 I am not a robot（截图2）
+    handle_cloudflare(page, timeout=90)
+    try:
+        page.wait_for_selector('button:has-text("I am not a robot"):visible', timeout=60000)
+    except Exception:
+        page.screenshot(path=f"ad_no_robot_{tag}.png")
+        log(f"❌ [{tag}] 验证页未出现 I am not a robot")
+        return False
+    if not click_first_visible(page, ['button:has-text("I am not a robot"):visible', '#submit-button']):
+        page.screenshot(path=f"ad_no_robot_{tag}.png")
+        log(f"❌ [{tag}] I am not a robot 点击失败")
+        return False
+    log(f"🖱️ [{tag}] 已点 I am not a robot，进倒计时")
+    solve_modal_turnstile(page, timeout=60)
+
+    # 第3页："Please wait while your link is being prepared" 倒计时 → /go/ 跳转链接（截图3）
     go_found = False
     try:
-        page.wait_for_selector('a[href*="/go/"]:visible', timeout=25000)
+        page.wait_for_selector('a[href*="/go/"]:visible', timeout=120000)
         go_found = True
     except Exception:
         pass
-    if not go_found:
-        # 验证页可能弹出 Turnstile（录制里自放行，但换 IP/时间可能弹框），处理后再等
-        log(f"🛡️ [{tag}] /go/ 未出现，检查 Turnstile...")
-        solve_modal_turnstile(page, timeout=60)
-        try:
-            page.wait_for_selector('a[href*="/go/"]:visible', timeout=100000)
-            go_found = True
-        except Exception:
-            pass
     if not go_found:
         page.screenshot(path=f"ad_no_go_{tag}.png")
         log(f"❌ [{tag}] 倒计时后未出现 /go/ 跳转链接")
@@ -590,7 +598,7 @@ def api_auth(session, email, password, cookie=""):
     if not password:
         return None
     log("🔑 账密登录...")
-    return api_login(session, email, password)
+    return api_login(email, password)
 
 def process_account(browser, email, password, cookie, current_ip):
     session = requests.Session()
