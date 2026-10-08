@@ -10,7 +10,10 @@
 
 | Secret | 必填 | 说明 | 示例 |
 |---|---|---|---|
-| `ACCOUNT` | ✅ | 多账号，每行 `邮箱-----密码`，可追加第三段 `__session` Cookie（优先直用，失效自动回退账密） | `a@gmail.com-----p1`<br>`b@gmail.com-----p2-----eyJhbGci…` |
+| `EMAIL` | ✅（单账号） | Pella 邮箱（优先，配了就用它） | `a@gmail.com` |
+| `PASSWORD` | ✅（单账号） | Pella 密码 | |
+| `COOKIE_VALUE` | ❌ | `__session` 值，Cookie 优先直用，失效回退账密 | `eyJhbGci…` |
+| `ACCOUNT` | ✅（无 EMAIL 时） | 多账号兼容，每行 `邮箱-----密码[-----cookie]` | `a@gmail.com-----p1` |
 | `TG_BOT_TOKEN` | ❌ | Telegram Bot Token | |
 | `TG_CHAT_ID` | ❌ | Telegram Chat ID | |
 | `NODE_LINK` | ❌ | 代理节点（vless/vmess/trojan/…完整分享链接，不配即直连） | |

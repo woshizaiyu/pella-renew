@@ -24,8 +24,11 @@ except ImportError:
     from playwright.sync_api import sync_playwright
     USING_PATCHRIGHT = False
 
-# --- 环境变量 ---
-ACCOUNT      = os.environ.get('ACCOUNT') or ""       # 多账号，每行 email-----password
+# --- 环境变量（单账号优先 eooce 风格；多账号用 ACCOUNT 多行兼容）---
+EMAIL        = os.environ.get('EMAIL') or ""
+PASSWORD     = os.environ.get('PASSWORD') or ""
+COOKIE_VALUE = os.environ.get('COOKIE_VALUE') or ""  # Pella __session JWT，可选
+ACCOUNT      = os.environ.get('ACCOUNT') or ""       # 兼容多账号，每行 email-----password[-----cookie]
 TG_CHAT_ID   = os.environ.get('TG_CHAT_ID') or ""
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN') or ""
 
@@ -631,10 +634,13 @@ def process_account(browser, email, password, cookie, current_ip):
     return True, "⏳ 无需续期\n" + "\n".join(lines)
 
 def main():
-    accounts = parse_accounts(ACCOUNT)
+    if EMAIL:
+        accounts = [(EMAIL, PASSWORD, COOKIE_VALUE)]
+    else:
+        accounts = parse_accounts(ACCOUNT)
     log(f"🔍 账号数: {len(accounts)}, 代理: {'开' if IS_PROXY else '关'}")
     if not accounts:
-        log("❌ 未配置 ACCOUNT")
+        log("❌ 未配置 EMAIL 或 ACCOUNT")
         sys.exit(1)
     current_ip = get_current_ip(PROXY_SERVER)
     log(f"🎯 当前出口IP: {current_ip}")
