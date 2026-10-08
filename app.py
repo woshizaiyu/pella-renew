@@ -594,6 +594,12 @@ def api_auth(session, email, password, cookie=""):
 
 def process_account(browser, email, password, cookie, current_ip):
     session = requests.Session()
+    lines = []
+    any_fail = False
+    any_succ = False
+    jwt = api_auth(session, email, password, cookie)
+    if not jwt:
+        return False, "❌ 错误: 登录失败"
     servers = api_get_servers(session, jwt)
     if not servers:
         return True, "⏳ 无需续期\n暂无服务器"
