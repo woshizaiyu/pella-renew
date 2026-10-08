@@ -781,10 +781,10 @@ def process_account(browser, email, password, cookie, current_ip):
             time.sleep(1)
             info = api_get_info(session, jwt, sid)
             before = info.get('expiry') or srv.get('expiry')
-            links = info.get('renew_links') or []
+            links = [l for l in (info.get('renew_links') or []) if l.get('reward') == 24]  # 只要24H cuty，32H srnky砍掉
             unclaimed = [l for l in links if not l.get('claimed')]
             if not links:
-                lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} | 无可用广告")
+                lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} | 无24H广告")
                 continue
             if not unclaimed:
                 lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} | 广告冷却中")
