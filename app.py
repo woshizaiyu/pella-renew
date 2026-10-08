@@ -415,7 +415,7 @@ def click_first_visible(page, selectors, timeout_each=8000):
             continue
     return None
 
-def pass_one_link(page, ctx, session, email, password, server_id, link):
+def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     """走完一条广告链并领奖。成功标准：info 里该条 claimed=True。"""
     alias = link.get('link', '')
     lid = link.get('id', '')
@@ -454,7 +454,7 @@ def pass_one_link(page, ctx, session, email, password, server_id, link):
     log(f"🔗 [{tag}] 终点: {dest}")
 
     # 临用前换新鲜 JWT（60s 有效），再进领奖页（前端 /renew/:id 落页 2s 自动 claim）
-    jwt = api_login(session, email, password)
+    jwt = api_auth(session, email, password, cookie)
     if not jwt:
         log(f"❌ [{tag}] 领奖前登录失败")
         return False
@@ -473,7 +473,7 @@ def pass_one_link(page, ctx, session, email, password, server_id, link):
 
     for i in range(4):
         time.sleep(5)
-        jwt2 = api_login(session, email, password) or jwt
+        jwt2 = api_auth(session, email, password, cookie) or jwt
         info = api_get_info(session, jwt2, server_id)
         for l in info.get('renew_links') or []:
             if l.get('id') == lid and l.get('claimed'):
@@ -490,16 +490,37 @@ def parse_accounts(s):
     for line in (s or '').splitlines():
         line = line.strip()
         if line and '-----' in line:
-            email, password = [x.strip() for x in line.split('-----', 1)]
-            if email and password:
-                out.append((email, password))
+            parts = [x.strip() for x in line.split('-----')]
+            email = parts[0] if len(parts) > 0 else ''
+            password = parts[1] if len(parts) > 1 else ''
+            cookie = parts[2] if len(parts) > 2 else ''  # 可选：__session JWT，Cookie 优先
+            if email and (password or cookie):
+                out.append((email, password, cookie))
     return out
 
-def process_account(browser, email, password, current_ip):
+def api_auth(session, email, password, cookie=""):
+    """Cookie 优先（eooce 基座策略）：__session JWT 直用，失效回退账密 API 登录。"""
+    if cookie:
+        log("📇 尝试 Cookie 登录...")
+        try:
+            r = session.get(f"{API}/user/servers", headers=api_headers(cookie),
+                            timeout=20, proxies=REQUESTS_PROXIES)
+            if r.status_code == 200:
+                log("✅ Cookie 登录成功！")
+                return cookie
+            log(f"❌ Cookie 失效（HTTP {r.status_code}），回退账密")
+        except Exception as e:
+            log(f"⚠️ Cookie 登录异常，回退账密: {e}")
+    if not password:
+        return None
+    log("🔑 账密登录...")
+    return api_login(session, email, password)
+
+def process_account(browser, email, password, cookie, current_ip):
     session = requests.Session()
     lines = []
     ok_all = True
-    jwt = api_login(session, email, password)
+    jwt = api_auth(session, email, password, cookie)
     if not jwt:
         return False, "❌ 错误: 登录失败"
     servers = api_get_servers(session, jwt)
@@ -522,10 +543,10 @@ def process_account(browser, email, password, current_ip):
                 continue
             succ = 0
             for link in todo:
-                if pass_one_link(page, ctx, session, email, password, sid, link):
+                if pass_one_link(page, ctx, session, email, password, cookie, sid, link):
                     succ += 1
                 time.sleep(1)
-            jwt3 = api_login(session, email, password) or jwt
+            jwt3 = api_auth(session, email, password, cookie) or jwt
             after = api_get_info(session, jwt3, sid).get('expiry') or before
             if succ:
                 lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} → {calc_remaining(after)} | ✅成功({succ}/{len(todo)})")
@@ -557,10 +578,10 @@ def main():
         try:
             log("🚀 启动反检测内核浏览器...")
             browser = open_browser(p)
-            for email, password in accounts:
+            for email, password, cookie in accounts:
                 log(f"===== 账号: {mask_email(email)} =====")
                 try:
-                    ok, status_lines = process_account(browser, email, password, current_ip)
+                    ok, status_lines = process_account(browser, email, password, cookie, current_ip)
                 except Exception as e:
                     log(f"❌ 账号异常: {e}")
                     ok, status_lines = False, f"❌ 错误: {e}"
