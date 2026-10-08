@@ -24,11 +24,10 @@ except ImportError:
     from playwright.sync_api import sync_playwright
     USING_PATCHRIGHT = False
 
-# --- 环境变量（单账号优先 eooce 风格；多账号用 ACCOUNT 多行兼容）---
+# --- 环境变量（单账号，eooce 基座原样） ---
 EMAIL        = os.environ.get('EMAIL') or ""
 PASSWORD     = os.environ.get('PASSWORD') or ""
-COOKIE_VALUE = os.environ.get('COOKIE_VALUE') or ""  # Pella __session JWT，可选
-ACCOUNT      = os.environ.get('ACCOUNT') or ""       # 兼容多账号，每行 email-----password[-----cookie]
+COOKIE_VALUE = os.environ.get('COOKIE_VALUE') or ""  # Pella __session JWT，Cookie 优先
 TG_CHAT_ID   = os.environ.get('TG_CHAT_ID') or ""
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN') or ""
 
@@ -544,21 +543,37 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     log(f"❌ [{tag}] 领奖未确认（claimed 仍 false）")
     return False
 
-# ==================== 主流程 ====================
+# ==================== 主流程（单账号） ====================
 
-def parse_accounts(s):
-    out = []
-    for line in (s or '').splitlines():
-        line = line.strip()
-        if line and '-----' in line:
-            parts = [x.strip() for x in line.split('-----')]
-            email = parts[0] if len(parts) > 0 else ''
-            password = parts[1] if len(parts) > 1 else ''
-            cookie = parts[2] if len(parts) > 2 else ''  # 可选：__session JWT，Cookie 优先
-            if email and (password or cookie):
-                out.append((email, password, cookie))
-    return out
-
+def main():
+    log(f"🔍 凭证检测: COOKIE_VALUE={'已配置' if COOKIE_VALUE else '未配置'}, "
+        f"EMAIL={'已配置' if EMAIL else '未配置'}, PASSWORD={'已配置' if PASSWORD else '未配置'}")
+    if not COOKIE_VALUE and not (EMAIL and PASSWORD):
+        log("❌ 缺少登录凭证")
+        sys.exit(1)
+    log(f"🔍 代理: {'开' if IS_PROXY else '关'}")
+    current_ip = get_current_ip(PROXY_SERVER)
+    log(f"🎯 当前出口IP: {current_ip}")
+    with sync_playwright() as p:
+        browser = None
+        try:
+            log("🚀 启动反检测内核浏览器...")
+            browser = open_browser(p)
+            email = EMAIL or "cookie账号"
+            log(f"===== 账号: {mask_email(email)} =====")
+            try:
+                ok, status_lines = process_account(browser, EMAIL, PASSWORD, COOKIE_VALUE, current_ip)
+            except Exception as e:
+                log(f"❌ 账号异常: {e}")
+                ok, status_lines = False, f"❌ 错误: {e}"
+            send_telegram_notification("🎰 PellaFree 续期报告", status_lines, email, current_ip)
+            sys.exit(0 if ok else 1)
+        finally:
+            if browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 def api_auth(session, email, password, cookie=""):
     """Cookie 优先（eooce 基座策略）：__session JWT 直用，失效回退账密 API 登录。"""
     if cookie:
@@ -579,12 +594,6 @@ def api_auth(session, email, password, cookie=""):
 
 def process_account(browser, email, password, cookie, current_ip):
     session = requests.Session()
-    lines = []
-    any_fail = False
-    any_succ = False
-    jwt = api_auth(session, email, password, cookie)
-    if not jwt:
-        return False, "❌ 错误: 登录失败"
     servers = api_get_servers(session, jwt)
     if not servers:
         return True, "⏳ 无需续期\n暂无服务器"
@@ -632,42 +641,6 @@ def process_account(browser, email, password, cookie, current_ip):
     if any_fail:
         return False, "❌ 续期失败\n" + "\n".join(lines)
     return True, "⏳ 无需续期\n" + "\n".join(lines)
-
-def main():
-    if EMAIL:
-        accounts = [(EMAIL, PASSWORD, COOKIE_VALUE)]
-    else:
-        accounts = parse_accounts(ACCOUNT)
-    log(f"🔍 账号数: {len(accounts)}, 代理: {'开' if IS_PROXY else '关'}")
-    if not accounts:
-        log("❌ 未配置 EMAIL 或 ACCOUNT")
-        sys.exit(1)
-    current_ip = get_current_ip(PROXY_SERVER)
-    log(f"🎯 当前出口IP: {current_ip}")
-    failed = 0
-    with sync_playwright() as p:
-        browser = None
-        try:
-            log("🚀 启动反检测内核浏览器...")
-            browser = open_browser(p)
-            for email, password, cookie in accounts:
-                log(f"===== 账号: {mask_email(email)} =====")
-                try:
-                    ok, status_lines = process_account(browser, email, password, cookie, current_ip)
-                except Exception as e:
-                    log(f"❌ 账号异常: {e}")
-                    ok, status_lines = False, f"❌ 错误: {e}"
-                send_telegram_notification("🎰 PellaFree 续期报告", status_lines, email, current_ip)
-                if not ok:
-                    failed += 1
-                time.sleep(2)
-        finally:
-            if browser:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-    sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":
     main()
