@@ -14,7 +14,7 @@ Cloudflare Worker 只做检查+重启（见 ../workers/_worker.js），续期必
 cuty/srnky 广告链 + Turnstile 纯 fetch 无解。
 """
 
-import os, re, sys, time, random, json
+import os, re, sys, time, random
 from datetime import datetime, timezone
 import requests
 try:
@@ -263,6 +263,51 @@ def handle_cloudflare(page, timeout=240):
         pass
     return False
 
+def solve_modal_turnstile(page, timeout=90):
+    """弹窗/验证页内嵌 Turnstile 处理（eooce 模板原样）：token 生成即通过，20s 无框视为无需验证。"""
+    log("🛡️ 开始处理 Turnstile 验证...")
+    start = time.time()
+    last_click = 0
+    clicks = 0
+    no_frame_seconds = 0
+    while time.time() - start < timeout:
+        if _get_turnstile_token(page):
+            log("✅ Turnstile 验证通过！")
+            return True
+        frames = _find_visible_cf_frames(page)
+        if not frames:
+            no_frame_seconds += 1
+            if no_frame_seconds >= 20 and clicks == 0:
+                log("ℹ️ 未检测到 Turnstile 验证框，无需验证。")
+                return True
+            time.sleep(1)
+            continue
+        no_frame_seconds = 0
+        if clicks > 0 and time.time() - last_click > 4 and not _cf_checkbox_visible(page):
+            time.sleep(2)
+            if not _cf_checkbox_visible(page):
+                log("✅ Turnstile 复选框已消失，视为验证通过！")
+                return True
+        if time.time() - last_click > 6 and _cf_checkbox_visible(page):
+            log(f"🖱️ 点击 Turnstile 复选框（第 {clicks + 1} 次）...")
+            if _click_cf_checkbox(page, frames[-1]):
+                clicks += 1
+                last_click = time.time()
+                time.sleep(random.uniform(3, 5))
+                continue
+        if clicks == 0 and time.time() - start > 20 and time.time() - last_click > 6:
+            if _click_cf_checkbox(page, frames[-1]):
+                clicks += 1
+                last_click = time.time()
+                time.sleep(random.uniform(3, 5))
+                continue
+        time.sleep(1)
+    if _get_turnstile_token(page):
+        log("✅ Turnstile 验证通过！")
+        return True
+    log("❌ Turnstile 验证超时。")
+    return False
+
 def open_browser(p):
     """启动浏览器（eooce 模板原样）。返回 browser，调用方按账号建 context/page。"""
     proxy_arg = {"server": PROXY_SERVER} if IS_PROXY else None
@@ -438,9 +483,22 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
         return False
     log(f"🖱️ [{tag}] 已点 Continue ({used})")
 
+    go_found = False
     try:
-        page.wait_for_selector('a[href*="/go/"]:visible', timeout=120000)
+        page.wait_for_selector('a[href*="/go/"]:visible', timeout=25000)
+        go_found = True
     except Exception:
+        pass
+    if not go_found:
+        # 验证页可能弹出 Turnstile（录制里自放行，但换 IP/时间可能弹框），处理后再等
+        log(f"🛡️ [{tag}] /go/ 未出现，检查 Turnstile...")
+        solve_modal_turnstile(page, timeout=60)
+        try:
+            page.wait_for_selector('a[href*="/go/"]:visible', timeout=100000)
+            go_found = True
+        except Exception:
+            pass
+    if not go_found:
         page.screenshot(path=f"ad_no_go_{tag}.png")
         log(f"❌ [{tag}] 倒计时后未出现 /go/ 跳转链接")
         return False
@@ -519,50 +577,58 @@ def api_auth(session, email, password, cookie=""):
 def process_account(browser, email, password, cookie, current_ip):
     session = requests.Session()
     lines = []
-    ok_all = True
+    any_fail = False
+    any_succ = False
     jwt = api_auth(session, email, password, cookie)
     if not jwt:
         return False, "❌ 错误: 登录失败"
     servers = api_get_servers(session, jwt)
     if not servers:
-        return True, "暂无服务器"
+        return True, "⏳ 无需续期\n暂无服务器"
     ctx, page = new_account_page(browser)
     try:
         for srv in servers:
             sid = srv.get('id')
             name = srv.get('name') or sid[:8]
             ip = srv.get('ip') or 'N/A'
+            jwt = api_auth(session, email, password, cookie) or jwt  # JWT 60s 有效，每台刷新
             api_refresh_links(session, jwt, sid)
             time.sleep(1)
             info = api_get_info(session, jwt, sid)
             before = info.get('expiry') or srv.get('expiry')
             links = info.get('renew_links') or []
-            todo = [l for l in links if not l.get('claimed')] or links
-            if not todo:
+            unclaimed = [l for l in links if not l.get('claimed')]
+            if not links:
                 lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} | 无可用广告")
                 continue
+            if not unclaimed:
+                lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} | 广告冷却中")
+                continue
             succ = 0
-            for link in todo:
+            for link in unclaimed:
                 if pass_one_link(page, ctx, session, email, password, cookie, sid, link):
                     succ += 1
                 time.sleep(1)
             jwt3 = api_auth(session, email, password, cookie) or jwt
             after = api_get_info(session, jwt3, sid).get('expiry') or before
             if succ:
-                lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} → {calc_remaining(after)} | ✅成功({succ}/{len(todo)})")
+                any_succ = True
+                lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(before)} → {calc_remaining(after)} | ✅成功({succ}/{len(unclaimed)})")
             else:
-                ok_all = False
-                if all(l.get('claimed') for l in links):
-                    lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(after)} | 广告冷却中")
-                else:
-                    lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(after)} | ❌失败")
+                any_fail = True
+                lines.append(f"{name} | IP: {ip} | 剩余: {calc_remaining(after)} | ❌失败")
     finally:
         try:
             ctx.close()
         except Exception:
             pass
-    status = "✅ 续期成功" if ok_all else "❌ 续期失败"
-    return ok_all, status + "\n" + "\n".join(lines)
+    if any_succ and not any_fail:
+        return True, "✅ 续期成功\n" + "\n".join(lines)
+    if any_succ:
+        return False, "⚠️ 部分成功\n" + "\n".join(lines)
+    if any_fail:
+        return False, "❌ 续期失败\n" + "\n".join(lines)
+    return True, "⏳ 无需续期\n" + "\n".join(lines)
 
 def main():
     accounts = parse_accounts(ACCOUNT)

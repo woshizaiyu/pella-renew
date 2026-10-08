@@ -12,7 +12,7 @@ permissions:
 jobs:
   renew-pella:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45 # 多账号×双链×倒计时，放宽
 
     steps:
       - name: Checkout repository
