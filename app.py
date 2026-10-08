@@ -392,6 +392,16 @@ def api_headers(jwt):
     return {'Authorization': f'Bearer {jwt}', 'Content-Type': 'application/json',
             'Origin': WEB, 'Referer': f'{WEB}/', 'User-Agent': UA}
 
+JWT_TTL = 50  # JWT 60s 有效，50s 内复用，不重复打登录接口
+
+def fresh_jwt(session, email, password, cookie, auth):
+    """auth 为 {'jwt','ts'} 就地更新：新鲜直接复用，过期才重登。"""
+    if auth.get('jwt') and time.time() - auth.get('ts', 0) <= JWT_TTL:
+        return auth['jwt']
+    njwt = api_auth(session, email, password, cookie) or auth.get('jwt')
+    auth['jwt'], auth['ts'] = njwt, time.time()
+    return njwt
+
 def api_get_servers(session, jwt):
     try:
         r = session.get(f"{API}/user/servers", headers=api_headers(jwt),
@@ -565,7 +575,7 @@ def handle_shrinkearn(page, tag):
         log(f"⚠️ [{tag}] Shrinkearn Continue 点击失败: {str(e)[:100]}")
         return False
 
-def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
+def pass_one_link(page, ctx, session, email, password, cookie, server_id, link, auth):
     """走完一条广告链并领奖。成功标准：info 里该条 claimed=True。"""
     alias = link.get('link', '')
     lid = link.get('id', '')
@@ -665,8 +675,8 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     page = go_page
     log(f"🔗 [{tag}] 终点: {dest}")
 
-    # 临用前换新鲜 JWT（60s 有效），再进领奖页（前端 /renew/:id 落页 2s 自动 claim）
-    jwt = api_auth(session, email, password, cookie)
+    # 临用前换新鲜 JWT（前端 /renew/:id 落页 2s 自动 claim）；50s 内直接复用
+    jwt = fresh_jwt(session, email, password, cookie, auth)
     if not jwt:
         log(f"❌ [{tag}] 领奖前登录失败")
         return False
@@ -692,7 +702,7 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
             log(f"✅ [{tag}] 已领取")
             return True
         if i < 3 and not links_now:
-            jwt2 = api_auth(session, email, password, cookie) or jwt2
+            jwt2 = fresh_jwt(session, email, password, cookie, auth)
     page.screenshot(path=f"claim_fail_{tag}.png")
     log(f"❌ [{tag}] 领奖未确认（claimed 仍 false）")
     return False
@@ -754,7 +764,7 @@ def process_account(browser, email, password, cookie, current_ip):
     jwt = api_auth(session, email, password, cookie)
     if not jwt:
         return False, "❌ 错误: 登录失败"
-    jwt_ts = time.time()  # JWT 60s 有效，50s 内不重复登录去噪
+    auth = {'jwt': jwt, 'ts': time.time()}
     servers = api_get_servers(session, jwt)
     if not servers:
         return True, "⏳ 无需续期\n暂无服务器"
@@ -764,9 +774,9 @@ def process_account(browser, email, password, cookie, current_ip):
             sid = srv.get('id')
             name = srv.get('name') or sid[:8]
             ip = srv.get('ip') or 'N/A'
-            if time.time() - jwt_ts > 50:
-                jwt = api_auth(session, email, password, cookie) or jwt
-                jwt_ts = time.time()
+            if time.time() - auth['ts'] > JWT_TTL:
+                fresh_jwt(session, email, password, cookie, auth)
+            jwt = auth['jwt']
             api_refresh_links(session, jwt, sid)
             time.sleep(1)
             info = api_get_info(session, jwt, sid)
@@ -781,10 +791,10 @@ def process_account(browser, email, password, cookie, current_ip):
                 continue
             succ = 0
             for link in unclaimed:
-                if pass_one_link(page, ctx, session, email, password, cookie, sid, link):
+                if pass_one_link(page, ctx, session, email, password, cookie, sid, link, auth):
                     succ += 1
                 time.sleep(1)
-            jwt3 = api_auth(session, email, password, cookie) or jwt
+            jwt3 = fresh_jwt(session, email, password, cookie, auth)
             after = api_get_info(session, jwt3, sid).get('expiry') or before
             if succ:
                 any_succ = True
