@@ -463,6 +463,7 @@ def ensure_pella_auth(ctx, jwt):
 # ==================== 广告链（录制三幕：Continue→Turnstile→倒计时→/go/） ====================
 
 def click_first_visible(page, selectors, timeout_each=8000):
+    """通用单次点击（第1页 Continue 用）。"""
     for sel in selectors:
         try:
             loc = page.locator(sel).first
@@ -473,6 +474,50 @@ def click_first_visible(page, selectors, timeout_each=8000):
         except Exception:
             continue
     return None
+
+def click_robot_button(page, tag):
+    """验证页点 I am not a robot：等盾过完→普通点→JS 点→强制点，失败时打出全页按钮诊断。"""
+    try:
+        page.wait_for_function(
+            "() => document.body && document.body.innerText.includes('not a robot')",
+            timeout=60000)
+        log(f"🔍 [{tag}] 已到验证页")
+    except Exception:
+        page.screenshot(path=f"ad_no_robot_{tag}.png")
+        log(f"❌ [{tag}] 验证页未出现（无 not a robot 文案）")
+        return False
+    handle_cloudflare(page, timeout=90)  # 盾自过完再点，防 DOM 重绘导致元素脱离
+    time.sleep(2)
+    sels = ['button:has-text("I am not a robot")', '#submit-button']
+    for attempt in range(3):
+        for sel in sels:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() == 0:
+                    continue
+                try:
+                    loc.scroll_into_view_if_needed(timeout=5000)
+                except Exception:
+                    pass
+                if attempt == 0:
+                    loc.click(timeout=8000)
+                elif attempt == 1:
+                    loc.evaluate("(el) => el.click()")
+                else:
+                    loc.click(timeout=8000, force=True)
+                return True
+            except Exception as e:
+                log(f"⚠️ [{tag}] 点击尝试{attempt + 1} ({sel}) 失败: {str(e)[:120]}")
+                continue
+        time.sleep(2)
+    try:
+        btns = page.evaluate("() => Array.from(document.querySelectorAll('button,a.btn,input[type=submit]')).map(b => (b.innerText || b.value || '').trim()).filter(t => t)")
+        log(f"🔍 [{tag}] 当前页按钮: {btns[:12]}")
+    except Exception:
+        pass
+    page.screenshot(path=f"ad_no_robot_{tag}.png")
+    log(f"❌ [{tag}] I am not a robot 点击失败")
+    return False
 
 def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     """走完一条广告链并领奖。成功标准：info 里该条 claimed=True。"""
@@ -490,23 +535,15 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     time.sleep(2)
 
     # 第1页："Please click the button below to continue." → 点 Continue（截图1）
-    if not click_first_visible(page, ['button:has-text("Continue"):visible', '#submit-button']):
+    used = click_first_visible(page, ['button:has-text("Continue"):visible', '#submit-button'])
+    if not used:
         page.screenshot(path=f"ad_no_continue_{tag}.png")
         log(f"❌ [{tag}] 第1页找不到 Continue 按钮")
         return False
-    log(f"🖱️ [{tag}] 已点 Continue，进验证页")
+    log(f"🖱️ [{tag}] 已点 Continue ({used})，进验证页")
 
-    # 第2页：CF 盾自动过 + "verify that you are not a robot" → 点 I am not a robot（截图2）
-    handle_cloudflare(page, timeout=90)
-    try:
-        page.wait_for_selector('button:has-text("I am not a robot"):visible', timeout=60000)
-    except Exception:
-        page.screenshot(path=f"ad_no_robot_{tag}.png")
-        log(f"❌ [{tag}] 验证页未出现 I am not a robot")
-        return False
-    if not click_first_visible(page, ['button:has-text("I am not a robot"):visible', '#submit-button']):
-        page.screenshot(path=f"ad_no_robot_{tag}.png")
-        log(f"❌ [{tag}] I am not a robot 点击失败")
+    # 第2页：先确认到验证页 → 等盾过完 → 点 I am not a robot（截图2）
+    if not click_robot_button(page, tag):
         return False
     log(f"🖱️ [{tag}] 已点 I am not a robot，进倒计时")
     solve_modal_turnstile(page, timeout=60)
