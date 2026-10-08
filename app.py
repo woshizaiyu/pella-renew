@@ -475,18 +475,23 @@ def click_first_visible(page, selectors, timeout_each=8000):
             continue
     return None
 
-def click_robot_button(page, tag):
-    """验证页点 I am not a robot：等盾过完→普通点→JS 点→强制点，失败时打出全页按钮诊断。"""
+def verify_solve_then_click_robot(page, tag):
+    """验证页正确顺序（录制实证）：先等盾过（出 Success!/token）→ 再点 I am not a robot。
+    录制里 Turnstile 后台自过，前台只点一次按钮；CI 出现复选框则点掉等出 Success。"""
     try:
         page.wait_for_function(
             "() => document.body && document.body.innerText.includes('not a robot')",
             timeout=60000)
-        log(f"🔍 [{tag}] 已到验证页")
+        log(f"🔍 [{tag}] 已到验证页，先过盾")
     except Exception:
         page.screenshot(path=f"ad_no_robot_{tag}.png")
         log(f"❌ [{tag}] 验证页未出现（无 not a robot 文案）")
         return False
-    handle_cloudflare(page, timeout=90)  # 盾自过完再点，防 DOM 重绘导致元素脱离
+    # 先解盾：等出 Success!/token（自过或点框），再碰按钮
+    if not solve_modal_turnstile(page, timeout=90):
+        page.screenshot(path=f"ad_no_robot_{tag}.png")
+        log(f"❌ [{tag}] Turnstile 未通过，不点按钮")
+        return False
     time.sleep(2)
     sels = ['button:has-text("I am not a robot")', '#submit-button']
     for attempt in range(3):
@@ -519,6 +524,45 @@ def click_robot_button(page, tag):
     log(f"❌ [{tag}] I am not a robot 点击失败")
     return False
 
+def close_popup_ads(page):
+    """关盖住验证框的广告弹窗（如 Download is ready 的 Close）。"""
+    for sel in ['button:has-text("Close")', '[aria-label="Close"]',
+                'div[class*="popup"] button', 'button:has-text("×")']:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.click(timeout=3000)
+                time.sleep(1)
+        except Exception:
+            continue
+
+def handle_shrinkearn(page, tag):
+    """Shrinkearn 中转页（失败截图1）：先关弹窗 → 点 Verify you are human 复选框 → 点其下 Continue。"""
+    try:
+        txt = page.locator("body").inner_text(timeout=5000)
+    except Exception:
+        return False
+    if 'proceed to the destination' not in txt:
+        return False
+    log(f"🔀 [{tag}] 到 Shrinkearn 中转页，过第二道验证")
+    close_popup_ads(page)
+    frames = _find_visible_cf_frames(page)
+    if frames:
+        _click_cf_checkbox(page, frames[-1])
+        time.sleep(3)
+    else:
+        solve_modal_turnstile(page, timeout=45)
+    close_popup_ads(page)
+    try:
+        btn = page.locator('button:has-text("Continue"):visible').last
+        btn.scroll_into_view_if_needed(timeout=5000)
+        btn.click(timeout=8000)
+        log(f"🖱️ [{tag}] 已点 Shrinkearn Continue")
+        return True
+    except Exception as e:
+        log(f"⚠️ [{tag}] Shrinkearn Continue 点击失败: {str(e)[:100]}")
+        return False
+
 def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
     """走完一条广告链并领奖。成功标准：info 里该条 claimed=True。"""
     alias = link.get('link', '')
@@ -542,27 +586,29 @@ def pass_one_link(page, ctx, session, email, password, cookie, server_id, link):
         return False
     log(f"🖱️ [{tag}] 已点 Continue ({used})，进验证页")
 
-    # 第2页：先确认到验证页 → 等盾过完 → 点 I am not a robot（截图2）
-    if not click_robot_button(page, tag):
+    # 第2页：先解盾出 Success → 再点 I am not a robot（截图2，录制顺序）
+    if not verify_solve_then_click_robot(page, tag):
         return False
     log(f"🖱️ [{tag}] 已点 I am not a robot，进倒计时")
-    solve_modal_turnstile(page, timeout=60)
 
     # 第3页："Please wait while your link is being prepared" 倒计时 → /go/ 跳转链接（截图3）
-    go_found = False
-    try:
-        page.wait_for_selector('a[href*="/go/"]:visible', timeout=120000)
-        go_found = True
-    except Exception:
-        pass
-    if not go_found:
-        page.screenshot(path=f"ad_no_go_{tag}.png")
-        log(f"❌ [{tag}] 倒计时后未出现 /go/ 跳转链接")
-        return False
-    dest = page.locator('a[href*="/go/"]:visible').first.get_attribute('href') or ''
+    # 中途可能进 Shrinkearn 中转页（失败截图1），顺手过掉；deadline 轮询
+    dest = ''
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            loc = page.locator('a[href*="/go/"]:visible').first
+            if loc.count() > 0:
+                dest = loc.get_attribute('href') or ''
+                if dest:
+                    break
+        except Exception:
+            pass
+        handle_shrinkearn(page, tag)
+        time.sleep(3)
     if not dest:
         page.screenshot(path=f"ad_no_go_{tag}.png")
-        log(f"❌ [{tag}] /go/ 链接无 href")
+        log(f"❌ [{tag}] 倒计时后未出现 /go/ 跳转链接")
         return False
     if dest.startswith('/'):
         dest = page.url.rsplit('/', 1)[0] + dest
